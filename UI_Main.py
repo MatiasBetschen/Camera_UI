@@ -8,9 +8,8 @@ import io
 # -------------------------
 # CONFIG
 # -------------------------
-SERIAL_PORT = "COM11"     # CHANGE THIS
-BAUD_RATE = 115200       # MUST MATCH ARDUINO
-PREVIEW_SIZE = (320, 240)
+SERIAL_PORT = "COM11"   # CHANGE
+BAUD_RATE = 115200
 
 # -------------------------
 # RESOLUTION COMMANDS
@@ -31,22 +30,73 @@ RESOLUTIONS = {
 # SERIAL
 # -------------------------
 ser = serial.Serial(SERIAL_PORT, BAUD_RATE, timeout=1)
-time.sleep(2)  # allow SAMD reset
+time.sleep(2)
 
 # -------------------------
-# FUNCTIONS
+# GUI SETUP
 # -------------------------
-def set_resolution(event=None):
-    res = resolution_combo.get()
-    cmd = RESOLUTIONS[res]
-    ser.write(bytes([cmd]))
-    status_label.config(text=f"Resolution set to {res}")
+root = tk.Tk()
+root.title("ArduCAM Mini 2MP Viewer")
 
+# Start maximized (normal window, not kiosk)
+try:
+    root.state("zoomed")     # Windows
+except:
+    root.attributes("-zoomed", True)  # Linux fallback
+
+# -------------------------
+# MAIN LAYOUT
+# -------------------------
+root.grid_rowconfigure(0, weight=1)
+root.grid_columnconfigure(0, weight=1)
+
+image_label = tk.Label(root, bg="black")
+image_label.grid(row=0, column=0, sticky="nsew")
+
+control_bar = tk.Frame(root, bg="#2b2b2b", height=50)
+control_bar.grid(row=1, column=0, sticky="ew")
+control_bar.grid_propagate(False)
+
+# -------------------------
+# CONTROLS
+# -------------------------
+tk.Label(control_bar, text="Resolution:", fg="white", bg="#2b2b2b").pack(side="left", padx=10)
+
+resolution_combo = ttk.Combobox(
+    control_bar,
+    values=list(RESOLUTIONS.keys()),
+    state="readonly",
+    width=15
+)
+resolution_combo.set("320 x 240")
+resolution_combo.pack(side="left")
+resolution_combo.bind(
+    "<<ComboboxSelected>>",
+    lambda e: ser.write(bytes([RESOLUTIONS[resolution_combo.get()]]))
+)
+
+capture_btn = tk.Button(
+    control_bar,
+    text="Capture",
+    font=("Segoe UI", 11),
+    command=lambda: capture_image()
+)
+capture_btn.pack(side="left", padx=20)
+
+status_label = tk.Label(control_bar, text="Ready", fg="white", bg="#2b2b2b")
+status_label.pack(side="right", padx=10)
+
+# -------------------------
+# CAPTURE FUNCTION
+# -------------------------
 def capture_image():
     status_label.config(text="Capturing...")
-    root.update()
+    root.update_idletasks()
 
-    ser.write(bytes([0x10]))  # capture command
+    ser.reset_input_buffer()
+    ser.reset_output_buffer()
+    time.sleep(0.05)
+    ser.write(bytes([0x10]))
 
     jpg = bytearray()
     prev = None
@@ -57,60 +107,57 @@ def capture_image():
         if not b:
             continue
 
-        byte = b[0]
+        cur = b[0]
 
-        if prev == 0xFF and byte == 0xD8:
-            in_image = True
-            jpg.extend([0xFF, 0xD8])
-
-        elif in_image:
-            jpg.append(byte)
-            if prev == 0xFF and byte == 0xD9:
+        if not in_image:
+            if prev == 0xFF and cur == 0xD8:
+                in_image = True
+                jpg.extend([0xFF, 0xD8])
+        else:
+            jpg.append(cur)
+            if prev == 0xFF and cur == 0xD9:
                 break
 
-        prev = byte
+        prev = cur
 
     if not jpg:
-        status_label.config(text="Capture failed.")
+        status_label.config(text="Capture failed")
         return
 
     img = Image.open(io.BytesIO(jpg))
-    img.thumbnail(PREVIEW_SIZE)
-    img_tk = ImageTk.PhotoImage(img)
 
+    # Resize to available area
+    area_w = image_label.winfo_width()
+    area_h = image_label.winfo_height()
+
+    img_ratio = img.width / img.height
+    area_ratio = area_w / area_h
+
+    if img_ratio > area_ratio:
+        new_w = area_w
+        new_h = int(area_w / img_ratio)
+    else:
+        new_h = area_h
+        new_w = int(area_h * img_ratio)
+
+    img = img.resize((new_w, new_h), Image.BILINEAR)
+
+    img_tk = ImageTk.PhotoImage(img)
     image_label.config(image=img_tk)
     image_label.image = img_tk
 
-    status_label.config(text="Image captured.")
+    status_label.config(text=f"Captured ({img.width}x{img.height})")
 
 # -------------------------
-# GUI
+# CLEAN EXIT
 # -------------------------
-root = tk.Tk()
-root.title("ArduCAM Mini 2MP Viewer")
+def on_close():
+    ser.close()
+    root.destroy()
 
-image_label = tk.Label(root)
-image_label.pack(padx=10, pady=10)
+root.protocol("WM_DELETE_WINDOW", on_close)
 
-control_frame = tk.Frame(root)
-control_frame.pack(pady=5)
-
-tk.Label(control_frame, text="Resolution:").grid(row=0, column=0, padx=5)
-
-resolution_combo = ttk.Combobox(
-    control_frame,
-    values=list(RESOLUTIONS.keys()),
-    state="readonly",
-    width=15
-)
-resolution_combo.set("320 x 240")
-resolution_combo.grid(row=0, column=1)
-resolution_combo.bind("<<ComboboxSelected>>", set_resolution)
-
-capture_btn = tk.Button(control_frame, text="Capture", command=capture_image)
-capture_btn.grid(row=0, column=2, padx=10)
-
-status_label = tk.Label(root, text="Ready.")
-status_label.pack(pady=5)
-
+# -------------------------
+# START
+# -------------------------
 root.mainloop()

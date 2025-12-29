@@ -1,39 +1,28 @@
 #include <Wire.h>
 #include <SPI.h>
 #include <ArduCAM.h>
+#include "memorysaver.h"
 
-// -------- SAMD USB SERIAL FIX --------
-#define Serial SerialUSB
-
-// -------- CAMERA SELECTION --------
 #if !(defined OV2640_MINI_2MP)
-  #error Please enable OV2640_MINI_2MP in memorysaver.h
+#error Please enable OV2640_MINI_2MP in memorysaver.h
 #endif
 
-// -------- PIN CONFIG --------
-const int CS = 9;   // CHANGE if your board uses a different CS
+#define CS_PIN 9
 
-ArduCAM myCAM(OV2640, CS);
-
-bool is_header = false;
-uint8_t start_capture = 0;
+ArduCAM myCAM(OV2640, CS_PIN);
 
 void setup() {
-  // USB Serial
-  Serial.begin(115200);
-  while (!Serial) {
-    delay(10);
-  }
-  delay(1000);
+  uint8_t vid, pid;
 
-  Serial.println("ACK CMD ArduCAM Start! END");
-
-  // I2C + SPI
   Wire.begin();
-  SPI.begin();
+  Serial.begin(115200);
+  delay(2000);
 
-  pinMode(CS, OUTPUT);
-  digitalWrite(CS, HIGH);
+  Serial.println("ArduCAM Mini 2MP Ready");
+
+  pinMode(CS_PIN, OUTPUT);
+  digitalWrite(CS_PIN, HIGH);
+  SPI.begin();
 
   // Reset ArduCAM
   myCAM.write_reg(0x07, 0x80);
@@ -41,96 +30,93 @@ void setup() {
   myCAM.write_reg(0x07, 0x00);
   delay(100);
 
-  // Check SPI
+  // SPI test
   myCAM.write_reg(ARDUCHIP_TEST1, 0x55);
-  uint8_t temp = myCAM.read_reg(ARDUCHIP_TEST1);
-  if (temp != 0x55) {
-    Serial.println("ACK CMD SPI interface Error! END");
+  if (myCAM.read_reg(ARDUCHIP_TEST1) != 0x55) {
+    Serial.println("SPI ERROR");
     while (1);
   }
-  Serial.println("ACK CMD SPI interface OK. END");
 
   // Detect OV2640
-  uint8_t vid, pid;
   myCAM.wrSensorReg8_8(0xff, 0x01);
   myCAM.rdSensorReg8_8(OV2640_CHIPID_HIGH, &vid);
   myCAM.rdSensorReg8_8(OV2640_CHIPID_LOW, &pid);
 
   if (vid != 0x26 || (pid != 0x41 && pid != 0x42)) {
-    Serial.println("ACK CMD Can't find OV2640 module! END");
+    Serial.println("OV2640 NOT FOUND");
     while (1);
   }
-  Serial.println("ACK CMD OV2640 detected. END");
 
-  // Camera init
+  Serial.println("OV2640 detected");
+
   myCAM.set_format(JPEG);
   myCAM.InitCAM();
-  myCAM.OV2640_set_JPEG_size(OV2640_640x480);
-  delay(1000);
-
+  myCAM.OV2640_set_JPEG_size(OV2640_320x240);
   myCAM.clear_fifo_flag();
-
-  Serial.println("ACK CMD Ready. Send 0x10 to capture. END");
 }
 
 void loop() {
-  if (Serial.available()) {
-    uint8_t cmd = Serial.read();
+  if (!Serial.available()) return;
 
-    // -------- SINGLE IMAGE CAPTURE --------
-    if (cmd == 0x10) {
-      start_capture = 1;
-      Serial.println("ACK CMD CAM start single shoot. END");
-    }
-  }
+  uint8_t cmd = Serial.read();
 
-  if (start_capture) {
-    start_capture = 0;
+  // --------------------
+  // RESOLUTION COMMANDS
+  // --------------------
+  switch (cmd) {
+    case 0x00: myCAM.OV2640_set_JPEG_size(OV2640_160x120); break;
+    case 0x01: myCAM.OV2640_set_JPEG_size(OV2640_176x144); break;
+    case 0x02: myCAM.OV2640_set_JPEG_size(OV2640_320x240); break;
+    case 0x03: myCAM.OV2640_set_JPEG_size(OV2640_352x288); break;
+    case 0x04: myCAM.OV2640_set_JPEG_size(OV2640_640x480); break;
+    case 0x05: myCAM.OV2640_set_JPEG_size(OV2640_800x600); break;
+    case 0x06: myCAM.OV2640_set_JPEG_size(OV2640_1024x768); break;
+    case 0x07: myCAM.OV2640_set_JPEG_size(OV2640_1280x1024); break;
+    case 0x08: myCAM.OV2640_set_JPEG_size(OV2640_1600x1200); break;
 
-    myCAM.flush_fifo();
-    myCAM.clear_fifo_flag();
-    myCAM.start_capture();
-
-    while (!myCAM.get_bit(ARDUCHIP_TRIG, CAP_DONE_MASK)) {
-      delay(1);
-    }
-
-    Serial.println("ACK CMD CAM Capture Done. END");
-    read_fifo_burst();
-    myCAM.clear_fifo_flag();
+    // --------------------
+    // CAPTURE COMMAND
+    // --------------------
+    case 0x10:
+      captureJPEG();
+      break;
   }
 }
 
-// -------- READ JPEG FROM FIFO --------
-void read_fifo_burst() {
+void captureJPEG() {
+  myCAM.flush_fifo();
+  myCAM.clear_fifo_flag();
+  myCAM.start_capture();
+
+  while (!myCAM.get_bit(ARDUCHIP_TRIG, CAP_DONE_MASK));
+
   uint32_t length = myCAM.read_fifo_length();
   if (length == 0 || length >= MAX_FIFO_SIZE) {
-    Serial.println("ACK CMD Invalid image size. END");
+    myCAM.clear_fifo_flag();
     return;
   }
 
   myCAM.CS_LOW();
   myCAM.set_fifo_burst();
 
-  uint8_t temp = 0, temp_last = 0;
-  bool is_header = false;
+  uint8_t prev = 0, cur;
 
   while (length--) {
-    temp_last = temp;
-    temp = SPI.transfer(0x00);
-
-    if (is_header) {
-      Serial.write(temp);
-    } else if (temp == 0xD8 && temp_last == 0xFF) {
-      is_header = true;
-      Serial.write(temp_last);
-      Serial.write(temp);
+    cur = SPI.transfer(0x00);
+    if (prev == 0xFF && cur == 0xD8) {
+      Serial.write(0xFF);
+      Serial.write(0xD8);
     }
-
-    if (temp == 0xD9 && temp_last == 0xFF) {
+    else if (prev == 0xFF && cur == 0xD9) {
+      Serial.write(0xD9);
       break;
     }
+    else if (prev == 0xFF || cur != 0xFF) {
+      Serial.write(cur);
+    }
+    prev = cur;
   }
 
   myCAM.CS_HIGH();
+  myCAM.clear_fifo_flag();
 }
