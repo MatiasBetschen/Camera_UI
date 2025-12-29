@@ -99,24 +99,30 @@ void captureJPEG() {
   myCAM.CS_LOW();
   myCAM.set_fifo_burst();
 
+  bool jpegStarted = false;
   uint8_t prev = 0, cur;
 
   while (length--) {
     cur = SPI.transfer(0x00);
-    if (prev == 0xFF && cur == 0xD8) {
-      Serial.write(0xFF);
-      Serial.write(0xD8);
-    }
-    else if (prev == 0xFF && cur == 0xD9) {
-      Serial.write(0xD9);
-      break;
-    }
-    else if (prev == 0xFF || cur != 0xFF) {
+
+    if (!jpegStarted) {
+      if (prev == 0xFF && cur == 0xD8) {
+        jpegStarted = true;
+        Serial.write(0xFF);
+        Serial.write(0xD8);
+      }
+    } else {
       Serial.write(cur);
+      if (prev == 0xFF && cur == 0xD9) {
+        break;
+      }
     }
+
     prev = cur;
+    delayMicroseconds(15);  // VERY IMPORTANT for SAMD USB
   }
 
   myCAM.CS_HIGH();
   myCAM.clear_fifo_flag();
 }
+
