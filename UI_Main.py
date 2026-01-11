@@ -4,6 +4,10 @@ import tkinter as tk
 from tkinter import ttk
 from PIL import Image, ImageTk
 import io
+import matplotlib.pyplot as plt
+from matplotlib.animation import FuncAnimation
+import threading
+import queue
 
 # -------------------------
 # CONFIG
@@ -87,6 +91,60 @@ status_label = tk.Label(control_bar, text="Ready", fg="white", bg="#2b2b2b")
 status_label.pack(side="right", padx=10)
 
 # -------------------------
+# DATA QUEUE FOR GRAPH
+# -------------------------
+data_queue = queue.Queue()
+
+def read_serial():
+    while True:
+        if ser.in_waiting > 0:
+            line = ser.readline().decode('utf-8').strip()
+            if line.startswith("Gyro"):
+                try:
+                    data = [float(x) for x in line.split(": ")[1].split(", ")]
+                    data_queue.put(data)
+                except ValueError:
+                    continue
+
+serial_thread = threading.Thread(target=read_serial, daemon=True)
+serial_thread.start()
+
+# -------------------------
+# GRAPH SETUP
+# -------------------------
+fig, ax = plt.subplots()
+ax.set_title("Live Gyro Data")
+ax.set_xlabel("Time")
+ax.set_ylabel("Gyro [deg/s]")
+
+x_data, gx_data, gy_data, gz_data = [], [], [], []
+
+def update(frame):
+    while not data_queue.empty():
+        data = data_queue.get()
+        x_data.append(len(x_data))
+        gx_data.append(data[0])
+        gy_data.append(data[1])
+        gz_data.append(data[2])
+
+        if len(x_data) > 100:
+            x_data.pop(0)
+            gx_data.pop(0)
+            gy_data.pop(0)
+            gz_data.pop(0)
+
+    ax.clear()
+    ax.plot(x_data, gx_data, label="Gyro X")
+    ax.plot(x_data, gy_data, label="Gyro Y")
+    ax.plot(x_data, gz_data, label="Gyro Z")
+    ax.legend()
+    ax.set_title("Live Gyro Data")
+    ax.set_xlabel("Time")
+    ax.set_ylabel("Gyro [deg/s]")
+
+ani = FuncAnimation(fig, update, interval=100)
+
+# -------------------------
 # CAPTURE FUNCTION
 # -------------------------
 def capture_image():
@@ -147,6 +205,33 @@ def capture_image():
     image_label.image = img_tk
 
     status_label.config(text=f"Captured ({img.width}x{img.height})")
+
+# -------------------------
+# DASHBOARD LAYOUT
+# -------------------------
+def show_dashboard():
+    dashboard = tk.Toplevel(root)
+    dashboard.title("Dashboard")
+
+    # Image Viewer
+    image_frame = tk.Frame(dashboard)
+    image_frame.pack(side="left", fill="both", expand=True)
+
+    image_label = tk.Label(image_frame, bg="black")
+    image_label.pack(fill="both", expand=True)
+
+    # Graph Viewer
+    graph_frame = tk.Frame(dashboard)
+    graph_frame.pack(side="right", fill="both", expand=True)
+
+    canvas = plt.backends.backend_tkagg.FigureCanvasTkAgg(fig, master=graph_frame)
+    canvas.get_tk_widget().pack(fill="both", expand=True)
+
+    dashboard.protocol("WM_DELETE_WINDOW", on_close)
+
+# Add Dashboard Button
+btn_dashboard = tk.Button(control_bar, text="Show Dashboard", command=show_dashboard)
+btn_dashboard.pack(side="left", padx=20)
 
 # -------------------------
 # CLEAN EXIT
