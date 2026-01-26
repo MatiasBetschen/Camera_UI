@@ -4,15 +4,11 @@ import tkinter as tk
 from tkinter import ttk
 from PIL import Image, ImageTk
 import io
-import matplotlib.pyplot as plt
-from matplotlib.animation import FuncAnimation
-import threading
-import queue
 
 # -------------------------
 # CONFIG
 # -------------------------
-SERIAL_PORT = "COM11"   # CHANGE
+SERIAL_PORT = "COM16"   # CHANGE
 BAUD_RATE = 115200
 
 # -------------------------
@@ -29,6 +25,9 @@ RESOLUTIONS = {
     "1280 x 1024": 0x07,
     "1600 x 1200": 0x08
 }
+
+EXPOSURE_VALUES = [0x10, 0x20, 0x30, 0x40, 0x50, 0x60, 0x70, 0x80]  # Example values
+GAIN_VALUES = [0x10, 0x20, 0x30, 0x40, 0x50, 0x60, 0x70, 0x80]      # Example values
 
 # -------------------------
 # SERIAL
@@ -72,7 +71,7 @@ resolution_combo = ttk.Combobox(
     state="readonly",
     width=15
 )
-resolution_combo.set("320 x 240")
+resolution_combo.set("1600 x 1200")
 resolution_combo.pack(side="left")
 resolution_combo.bind(
     "<<ComboboxSelected>>",
@@ -87,62 +86,38 @@ capture_btn = tk.Button(
 )
 capture_btn.pack(side="left", padx=20)
 
+tk.Label(control_bar, text="Exposure:", fg="white", bg="#2b2b2b").pack(side="left", padx=10)
+
+exposure_combo = ttk.Combobox(
+    control_bar,
+    values=[f"0x{value:02X}" for value in EXPOSURE_VALUES],
+    state="readonly",
+    width=10
+)
+exposure_combo.set(f"0x{EXPOSURE_VALUES[0]:02X}")
+exposure_combo.pack(side="left")
+exposure_combo.bind(
+    "<<ComboboxSelected>>",
+    lambda e: set_exposure(int(exposure_combo.get(), 16))
+)
+
+tk.Label(control_bar, text="Gain:", fg="white", bg="#2b2b2b").pack(side="left", padx=10)
+
+gain_combo = ttk.Combobox(
+    control_bar,
+    values=[f"0x{value:02X}" for value in GAIN_VALUES],
+    state="readonly",
+    width=10
+)
+gain_combo.set(f"0x{GAIN_VALUES[0]:02X}")
+gain_combo.pack(side="left")
+gain_combo.bind(
+    "<<ComboboxSelected>>",
+    lambda e: set_gain(int(gain_combo.get(), 16))
+)
+
 status_label = tk.Label(control_bar, text="Ready", fg="white", bg="#2b2b2b")
 status_label.pack(side="right", padx=10)
-
-# -------------------------
-# DATA QUEUE FOR GRAPH
-# -------------------------
-data_queue = queue.Queue()
-
-def read_serial():
-    while True:
-        if ser.in_waiting > 0:
-            line = ser.readline().decode('utf-8').strip()
-            if line.startswith("Gyro"):
-                try:
-                    data = [float(x) for x in line.split(": ")[1].split(", ")]
-                    data_queue.put(data)
-                except ValueError:
-                    continue
-
-serial_thread = threading.Thread(target=read_serial, daemon=True)
-serial_thread.start()
-
-# -------------------------
-# GRAPH SETUP
-# -------------------------
-fig, ax = plt.subplots()
-ax.set_title("Live Gyro Data")
-ax.set_xlabel("Time")
-ax.set_ylabel("Gyro [deg/s]")
-
-x_data, gx_data, gy_data, gz_data = [], [], [], []
-
-def update(frame):
-    while not data_queue.empty():
-        data = data_queue.get()
-        x_data.append(len(x_data))
-        gx_data.append(data[0])
-        gy_data.append(data[1])
-        gz_data.append(data[2])
-
-        if len(x_data) > 100:
-            x_data.pop(0)
-            gx_data.pop(0)
-            gy_data.pop(0)
-            gz_data.pop(0)
-
-    ax.clear()
-    ax.plot(x_data, gx_data, label="Gyro X")
-    ax.plot(x_data, gy_data, label="Gyro Y")
-    ax.plot(x_data, gz_data, label="Gyro Z")
-    ax.legend()
-    ax.set_title("Live Gyro Data")
-    ax.set_xlabel("Time")
-    ax.set_ylabel("Gyro [deg/s]")
-
-ani = FuncAnimation(fig, update, interval=100)
 
 # -------------------------
 # CAPTURE FUNCTION
@@ -154,6 +129,10 @@ def capture_image():
     ser.reset_input_buffer()
     ser.reset_output_buffer()
     time.sleep(0.05)
+
+    # Send selected resolution command
+    ser.write(bytes([RESOLUTIONS[resolution_combo.get()]]))
+
     ser.write(bytes([0x10]))
 
     jpg = bytearray()
@@ -207,31 +186,15 @@ def capture_image():
     status_label.config(text=f"Captured ({img.width}x{img.height})")
 
 # -------------------------
-# DASHBOARD LAYOUT
+# LOW LIGHT FUNCTIONS
 # -------------------------
-def show_dashboard():
-    dashboard = tk.Toplevel(root)
-    dashboard.title("Dashboard")
+def set_exposure(value):
+    ser.write(bytes([0x21, value]))
+    status_label.config(text=f"Exposure set to 0x{value:02X}")
 
-    # Image Viewer
-    image_frame = tk.Frame(dashboard)
-    image_frame.pack(side="left", fill="both", expand=True)
-
-    image_label = tk.Label(image_frame, bg="black")
-    image_label.pack(fill="both", expand=True)
-
-    # Graph Viewer
-    graph_frame = tk.Frame(dashboard)
-    graph_frame.pack(side="right", fill="both", expand=True)
-
-    canvas = plt.backends.backend_tkagg.FigureCanvasTkAgg(fig, master=graph_frame)
-    canvas.get_tk_widget().pack(fill="both", expand=True)
-
-    dashboard.protocol("WM_DELETE_WINDOW", on_close)
-
-# Add Dashboard Button
-btn_dashboard = tk.Button(control_bar, text="Show Dashboard", command=show_dashboard)
-btn_dashboard.pack(side="left", padx=20)
+def set_gain(value):
+    ser.write(bytes([0x22, value]))
+    status_label.config(text=f"Gain set to 0x{value:02X}")
 
 # -------------------------
 # CLEAN EXIT
