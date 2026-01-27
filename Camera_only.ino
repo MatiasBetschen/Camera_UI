@@ -10,7 +10,13 @@
 // --------------------
 // PIN DEFINITIONS
 // --------------------
-#define CAM_CS_PIN   10
+#define CAM_CS_PIN 10
+
+// --------------------
+// CONSTANTS
+// --------------------
+#define LINE_TIME_US 30.0   // Approx. OV2640 line period (µs)
+#define MAX_EXPOSURE_LINES 0xFFFFF  // 20-bit max
 
 // --------------------
 // OBJECTS
@@ -27,20 +33,11 @@ void setup() {
   Serial.begin(115200);
   delay(2000);
 
-  Serial.println("System starting...");
-
-  // SPI
   SPI.begin();
-
-  // Chip select
   pinMode(CAM_CS_PIN, OUTPUT);
   digitalWrite(CAM_CS_PIN, HIGH);
 
-  // --------------------
-  // ArduCAM INIT
-  // --------------------
-  Serial.println("Initializing ArduCAM...");
-
+  // Reset ArduCAM
   myCAM.write_reg(0x07, 0x80);
   delay(100);
   myCAM.write_reg(0x07, 0x00);
@@ -49,16 +46,16 @@ void setup() {
   // SPI test
   myCAM.write_reg(ARDUCHIP_TEST1, 0x55);
   if (myCAM.read_reg(ARDUCHIP_TEST1) != 0x55) {
-    Serial.println("ArduCAM SPI ERROR");
+    Serial.println("SPI ERROR");
     while (1);
   }
 
   // Detect OV2640
-  myCAM.wrSensorReg8_8(0xff, 0x01);
+  myCAM.wrSensorReg8_8(0xFF, 0x01);
   myCAM.rdSensorReg8_8(OV2640_CHIPID_HIGH, &vid);
   myCAM.rdSensorReg8_8(OV2640_CHIPID_LOW, &pid);
 
-  if (vid != 0x26 || (pid != 0x41 && pid != 0x42)) {
+  if (vid != 0x26) {
     Serial.println("OV2640 NOT FOUND");
     while (1);
   }
@@ -69,6 +66,8 @@ void setup() {
   myCAM.InitCAM();
   myCAM.OV2640_set_JPEG_size(OV2640_320x240);
   myCAM.clear_fifo_flag();
+
+  Serial.println("Ready");
 }
 
 // --------------------
@@ -94,25 +93,70 @@ void loop() {
       captureJPEG();
       break;
 
-    case 0x20: // Enable night mode
-      enableNightMode();
+    case 0x21: { // Set exposure time in ms (hex)
+      while (Serial.available() < 2);
+      uint16_t ms = (Serial.read() << 8) | Serial.read();
+      setExposureMs(ms);
       break;
+    }
+    case 0x22: {
+      while (!Serial.available());
+      uint8_t gain = Serial.read();
+      setGain(gain);
+      break;
+    }
 
-    case 0x21: // Set exposure
-      if (Serial.available()) {
-        uint8_t exposureValue = Serial.read();
-        setExposure(exposureValue);
-      }
-      break;
-
-    case 0x22: // Set gain
-      if (Serial.available()) {
-        uint8_t gainValue = Serial.read();
-        setGain(gainValue);
-      }
-      break;
   }
 }
+
+// --------------------
+// DISABLE AUTO EXPOSURE + GAIN
+// --------------------
+void disableAutoExposureAndGain() {
+  myCAM.wrSensorReg8_8(0xFF, 0x01);
+  uint8_t com8;
+  myCAM.rdSensorReg8_8(0x13, &com8);
+  com8 &= ~0x05;   // Clear AEC (bit0) and AGC (bit2)
+  myCAM.wrSensorReg8_8(0x13, com8);
+}
+
+// --------------------
+// SET EXPOSURE IN MILLISECONDS
+// --------------------
+void setExposureMs(uint16_t ms) {
+  disableAutoExposureAndGain();
+
+  float exposure_us = ms * 1000.0;
+  uint32_t exposure_lines = exposure_us / LINE_TIME_US;
+
+  if (exposure_lines > MAX_EXPOSURE_LINES)
+    exposure_lines = MAX_EXPOSURE_LINES;
+
+  myCAM.wrSensorReg8_8(0xFF, 0x01);
+
+  uint8_t high = (exposure_lines >> 12) & 0x0F;
+  uint8_t mid  = (exposure_lines >> 4)  & 0xFF;
+  uint8_t low  = (exposure_lines & 0x0F) << 4;
+
+  myCAM.wrSensorReg8_8(0x04, high);
+  myCAM.wrSensorReg8_8(0x10, mid);
+  myCAM.wrSensorReg8_8(0x45, low);
+
+  Serial.print("Exposure set: ");
+  Serial.print(ms);
+  Serial.println(" ms");
+}
+
+void setGain(uint8_t gain) {
+  disableAutoExposureAndGain();
+
+  myCAM.wrSensorReg8_8(0xFF, 0x01);
+  myCAM.wrSensorReg8_8(0x00, gain); // OV2640 gain register
+
+  Serial.print("Gain set: 0x");
+  Serial.println(gain, HEX);
+}
+
 
 // --------------------
 // CAPTURE JPEG
@@ -125,26 +169,25 @@ void captureJPEG() {
   while (!myCAM.get_bit(ARDUCHIP_TRIG, CAP_DONE_MASK));
 
   uint32_t length = myCAM.read_fifo_length();
-  if (length == 0 || length >= MAX_FIFO_SIZE) {
+  if (!length || length >= MAX_FIFO_SIZE) {
     myCAM.clear_fifo_flag();
     return;
   }
 
-  digitalWrite(CAM_CS_PIN, LOW);   // enable camera
-
+  digitalWrite(CAM_CS_PIN, LOW);
   myCAM.set_fifo_burst();
 
-  bool jpegStarted = false;
+  bool started = false;
   uint8_t prev = 0, cur;
 
   while (length--) {
     cur = SPI.transfer(0x00);
 
-    if (!jpegStarted) {
+    if (!started) {
       if (prev == 0xFF && cur == 0xD8) {
-        jpegStarted = true;
-        Serial.write(0xFF);
-        Serial.write(0xD8);
+        started = true;
+        Serial.write(prev);
+        Serial.write(cur);
       }
     } else {
       Serial.write(cur);
@@ -152,38 +195,9 @@ void captureJPEG() {
     }
 
     prev = cur;
-    delayMicroseconds(15); // REQUIRED for SAMD USB
+    delayMicroseconds(15);
   }
 
   digitalWrite(CAM_CS_PIN, HIGH);
   myCAM.clear_fifo_flag();
-}
-
-// --------------------
-// ENABLE NIGHT MODE
-// --------------------
-void enableNightMode() {
-  myCAM.wrSensorReg8_8(0xFF, 0x01); // Select sensor register bank
-  myCAM.wrSensorReg8_8(0x3B, 0x0A); // Enable night mode
-  Serial.println("Night mode enabled");
-}
-
-// --------------------
-// SET EXPOSURE
-// --------------------
-void setExposure(uint8_t value) {
-  myCAM.wrSensorReg8_8(0xFF, 0x01); // Select sensor register bank
-  myCAM.wrSensorReg8_8(0x10, value); // Set exposure to the provided value
-  Serial.print("Exposure set to: 0x");
-  Serial.println(value, HEX);
-}
-
-// --------------------
-// SET GAIN
-// --------------------
-void setGain(uint8_t value) {
-  myCAM.wrSensorReg8_8(0xFF, 0x01); // Select sensor register bank
-  myCAM.wrSensorReg8_8(0x00, value); // Set gain to the provided value
-  Serial.print("Gain set to: 0x");
-  Serial.println(value, HEX);
 }
