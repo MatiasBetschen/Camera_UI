@@ -3,6 +3,8 @@
 #include <ArduCAM.h>
 #include "memorysaver.h"
 #include <LoRa.h>
+#include <SparkFunLSM6DS3.h>
+#include <SD.h>
 
 #if !(defined OV2640_MINI_2MP)
 #error Please enable OV2640_MINI_2MP in memorysaver.h

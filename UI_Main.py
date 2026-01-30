@@ -26,7 +26,8 @@ RESOLUTIONS = {
     "1600 x 1200": 0x08
 }
 
-EXPOSURE_VALUES = [0x10, 0x20, 0x30, 0x40, 0x50, 0x60, 0x70, 0x80]  # Example values
+EXPOSURE_VALUES_MS = [5, 10, 20, 50, 100, 200, 500, 1000]
+  # Example values
 GAIN_VALUES = [0x10, 0x20, 0x30, 0x40, 0x50, 0x60, 0x70, 0x80]      # Example values
 
 # -------------------------
@@ -51,13 +52,94 @@ except:
 # MAIN LAYOUT
 # -------------------------
 root.grid_rowconfigure(0, weight=1)
-root.grid_columnconfigure(0, weight=1)
+root.grid_columnconfigure(0, weight=0)  # left panel
+root.grid_columnconfigure(1, weight=1)  # image area
+
+# -------------------------
+# LEFT DATA PANEL
+# -------------------------
+data_panel = tk.Frame(root, bg="#1e1e1e", width=350)
+data_panel.grid(row=0, column=0, sticky="ns")
+data_panel.grid_propagate(False)
+
+# Title
+tk.Label(
+    data_panel,
+    text="Live Data",
+    fg="white",
+    bg="#1e1e1e",
+    font=("Segoe UI", 14, "bold")
+).pack(pady=(15, 20))
+
+# Object temperature
+tk.Label(
+    data_panel,
+    text="Object Temperature:",
+    fg="white",
+    bg="#1e1e1e",
+    font=("Segoe UI", 11)
+).pack(anchor="w", padx=15)
+
+object_temp_var = tk.StringVar(value="--.- °C")
+
+object_temp_label = tk.Label(
+    data_panel,
+    textvariable=object_temp_var,
+    fg="#00ffcc",
+    bg="#1e1e1e",
+    font=("Segoe UI", 18, "bold")
+)
+object_temp_label.pack(anchor="w", padx=15, pady=(5, 20))
+# -------------------------
+# IMU DATA
+# -------------------------
+tk.Label(
+    data_panel,
+    text="IMU (Accel | Gyro):",
+    fg="white",
+    bg="#1e1e1e",
+    font=("Segoe UI", 11)
+).pack(anchor="w", padx=15, pady=(10, 0))
+
+imu_var = tk.StringVar(value="--,--,-- | --,--,--")
+
+imu_label = tk.Label(
+    data_panel,
+    textvariable=imu_var,
+    fg="#ffaa00",
+    bg="#1e1e1e",
+    font=("Segoe UI", 11)
+)
+imu_label.pack(anchor="w", padx=15, pady=(5, 20))
+# -------------------------
+# VoltageDATA
+# -------------------------
+tk.Label(
+    data_panel,
+    text="Battery Voltage:",
+    fg="white",
+    bg="#1e1e1e",
+    font=("Segoe UI", 11)
+).pack(anchor="w", padx=15)
+object_voltage_var = tk.StringVar(value="--.- V")
+latest_voltage = tk.Label(
+    data_panel,
+    textvariable=object_voltage_var,
+    fg="#ff0000",
+    bg="#1e1e1e",
+    font=("Segoe UI", 18, "bold")
+)
+latest_voltage.pack(anchor="w", padx=15, pady=(5, 20))
+
+# -------------------------
+# IMAGE AREA
+# -------------------------
 
 image_label = tk.Label(root, bg="black")
-image_label.grid(row=0, column=0, sticky="nsew")
+image_label.grid(row=0, column=1, sticky="nsew")
 
 control_bar = tk.Frame(root, bg="#2b2b2b", height=50)
-control_bar.grid(row=1, column=0, sticky="ew")
+control_bar.grid(row=1, column=0, columnspan=2, sticky="ew")
 control_bar.grid_propagate(False)
 
 # -------------------------
@@ -90,16 +172,19 @@ tk.Label(control_bar, text="Exposure:", fg="white", bg="#2b2b2b").pack(side="lef
 
 exposure_combo = ttk.Combobox(
     control_bar,
-    values=[f"0x{value:02X}" for value in EXPOSURE_VALUES],
+    values=[f"{v} ms" for v in EXPOSURE_VALUES_MS],
     state="readonly",
     width=10
 )
-exposure_combo.set(f"0x{EXPOSURE_VALUES[0]:02X}")
+exposure_combo.set("50 ms")
 exposure_combo.pack(side="left")
 exposure_combo.bind(
     "<<ComboboxSelected>>",
-    lambda e: set_exposure(int(exposure_combo.get(), 16))
+    lambda e: set_exposure_ms(
+        exposure_combo.get().replace(" ms", "")
+    )
 )
+
 
 tk.Label(control_bar, text="Gain:", fg="white", bg="#2b2b2b").pack(side="left", padx=10)
 
@@ -109,7 +194,7 @@ gain_combo = ttk.Combobox(
     state="readonly",
     width=10
 )
-gain_combo.set(f"0x{GAIN_VALUES[0]:02X}")
+gain_combo.set(f"0x{GAIN_VALUES[0]:02X}") 
 gain_combo.pack(side="left")
 gain_combo.bind(
     "<<ComboboxSelected>>",
@@ -188,13 +273,60 @@ def capture_image():
 # -------------------------
 # LOW LIGHT FUNCTIONS
 # -------------------------
-def set_exposure(value):
-    ser.write(bytes([0x21, value]))
-    status_label.config(text=f"Exposure set to 0x{value:02X}")
+def set_exposure_ms(ms):
+    ms = int(ms)
+
+    msb = (ms >> 8) & 0xFF
+    lsb = ms & 0xFF
+
+    ser.write(bytes([0x21, msb, lsb]))
+    status_label.config(text=f"Exposure set to {ms} ms")
+
 
 def set_gain(value):
     ser.write(bytes([0x22, value]))
     status_label.config(text=f"Gain set to 0x{value:02X}")
+
+def update_temperature():
+    latest_temp = None
+    latest_imu = None
+
+    try:
+        while ser.in_waiting:
+            line = ser.readline().decode("ascii", errors="ignore").strip()
+
+            if not line:
+                continue
+
+            # ---- Temperature ----
+            if line.startswith("TMP:"):
+                latest_temp = float(line.split(":")[1])
+
+            # ---- IMU ----
+            elif line.startswith("IMU:"):
+                values = line.split(":")[1].split(",")
+                if len(values) == 6:
+                    latest_imu = [float(v) for v in values]
+            elif line.startswith("V:"):
+                vbat = float(line.split(":")[1])
+                latest_voltage.config(text=f"VBAT: {vbat:.2f} V")
+
+        if latest_temp is not None:
+            object_temp_var.set(f"{latest_temp:.2f} °C")
+
+        if latest_imu is not None:
+            ax, ay, az, gx, gy, gz = latest_imu
+            imu_var.set(
+                f"{ax:.2f}, {ay:.2f}, {az:.2f} | "
+                f"{gx:.1f}, {gy:.1f}, {gz:.1f}"
+            )
+        if latest_voltage is not None:
+            object_voltage_var.set(f"{vbat:.2f} %")
+
+    except Exception:
+        pass
+
+    root.after(250, update_temperature)
 
 # -------------------------
 # CLEAN EXIT
@@ -208,4 +340,5 @@ root.protocol("WM_DELETE_WINDOW", on_close)
 # -------------------------
 # START
 # -------------------------
+update_temperature()
 root.mainloop()

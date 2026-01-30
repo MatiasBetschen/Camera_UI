@@ -18,7 +18,6 @@ char imageFilename[20];
 // PIN DEFINITIONS
 // --------------------
 #define CAM_CS_PIN 10
-const int CS_PIN = 5;
 // --------------------
 // CONSTANTS
 // --------------------
@@ -102,10 +101,7 @@ void setup() {
 
   lastIMUTime = millis();
 
-  if (!SD.begin(CS_PIN)) {
-    Serial.println("SD card initialization failed!");
-    return;
-  }
+
   Serial.println("Ready");
 }
 
