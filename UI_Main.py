@@ -79,13 +79,13 @@ except:
 # MAIN LAYOUT
 # -------------------------
 root.grid_rowconfigure(0, weight=1)
-root.grid_columnconfigure(0, minsize=500, weight=0)  # left panel
+root.grid_columnconfigure(0, minsize=200, weight=0)  # left panel
 root.grid_columnconfigure(1, weight=1)  # image area
 
 # -------------------------
 # LEFT DATA PANEL
 # -------------------------
-data_panel = tk.Frame(root, bg="#1e1e1e", width=500)
+data_panel = tk.Frame(root, bg="#1e1e1e", width=200)
 data_panel.grid(row=0, column=0, sticky="ns")
 data_panel.grid_propagate(False)
 
@@ -194,7 +194,26 @@ latest_voltage = tk.Label(
     anchor="w"
 )
 latest_voltage.pack(anchor="w", padx=15, pady=(5, 20))
+button_frame = tk.Frame(data_panel, bg="#1e1e1e")
+button_frame.pack(side="bottom", pady=15)
 
+capture_btn = tk.Button(
+    button_frame,
+    text="Deploy",
+    font=("Segoe UI", 11),
+    width=12,
+    command=lambda: deploy()
+)
+reset_btn = tk.Button(
+    button_frame,
+    text="Reset",
+    font=("Segoe UI", 11),
+    width=12,
+    command=lambda: reset_deploy()
+)
+
+capture_btn.pack(side="left", padx=10)
+reset_btn.pack(side="left", padx=10)
 # -------------------------
 # IMAGE AREA
 # -------------------------
@@ -224,53 +243,6 @@ resolution_combo.bind(
     lambda e: ser.write(bytes([RESOLUTIONS[resolution_combo.get()]]))
 )
 
-capture_btn = tk.Button(
-    control_bar,
-    text="Deploy",
-    font=("Segoe UI", 11),
-    command=lambda: deploy()
-)
-reset_btn = tk.Button(
-    control_bar,
-    text="Reset",
-    font=("Segoe UI", 11),
-    command=lambda: reset_deploy()
-)
-capture_btn.pack(side="left", padx=20)
-reset_btn.pack(side="left")
-tk.Label(control_bar, text="Exposure:", fg="white", bg="#2b2b2b").pack(side="left", padx=10)
-
-exposure_combo = ttk.Combobox(
-    control_bar,
-    values=[f"{v} ms" for v in EXPOSURE_VALUES_MS],
-    state="readonly",
-    width=10
-)
-exposure_combo.set("50 ms")
-exposure_combo.pack(side="left")
-exposure_combo.bind(
-    "<<ComboboxSelected>>",
-    lambda e: set_exposure_ms(
-        exposure_combo.get().replace(" ms", "")
-    )
-)
-
-
-tk.Label(control_bar, text="Gain:", fg="white", bg="#2b2b2b").pack(side="left", padx=10)
-
-gain_combo = ttk.Combobox(
-    control_bar,
-    values=[f"0x{value:02X}" for value in GAIN_VALUES],
-    state="readonly",
-    width=10
-)
-gain_combo.set(f"0x{GAIN_VALUES[0]:02X}") 
-gain_combo.pack(side="left")
-gain_combo.bind(
-    "<<ComboboxSelected>>",
-    lambda e: set_gain(int(gain_combo.get(), 16))
-)
-
 status_label = tk.Label(control_bar, text="Ready", fg="white", bg="#2b2b2b")
 status_label.pack(side="right", padx=10)
 
@@ -288,8 +260,6 @@ def deploy():
     set_status("DEPLOYED")
     deployed = True
     deploy_start_time = time.time()
-
-
 def reset_deploy():
     global deployed, deploy_start_time
     status_label.config(text="Resetting...")
@@ -302,6 +272,9 @@ def reset_deploy():
     deployed = False
     deploy_start_time = None
     timer_var.set("00:00")
+    object_temp_var.set("--.- °C")
+    imu_var.set("--,--,-- | --,--,--")
+    object_voltage_var.set("--.- V")
 
 def set_status(state):
     status_var.set(state)
@@ -312,7 +285,6 @@ def set_status(state):
         status_big.config(fg="#00ff55")
     elif state == "IMPACT":
         status_big.config(fg="#ff3333")
-
 def update_timer():
     if deployed and deploy_start_time is not None:
         elapsed = int(time.time() - deploy_start_time)
@@ -321,21 +293,9 @@ def update_timer():
         timer_var.set(f"{mins:02d}:{secs:02d}")
 
     root.after(500, update_timer)
-
-def capture_image():
-    status_label.config(text="Capturing...")
-    root.update_idletasks()
-
-    ser.reset_input_buffer()
-    ser.reset_output_buffer()
-    time.sleep(0.05)
-
-    # Send selected resolution command
-    ser.write(bytes([RESOLUTIONS[resolution_combo.get()]]))
-
-    ser.write(bytes([0x10]))
-
+def serial_receiver():
     jpg = bytearray()
+    line_buf = bytearray()
     prev = None
     in_image = False
 
@@ -346,141 +306,56 @@ def capture_image():
 
         cur = b[0]
 
-        if not in_image:
-            if prev == 0xFF and cur == 0xD8:
-                in_image = True
-                jpg.extend([0xFF, 0xD8])
-        else:
+        if in_image:
             jpg.append(cur)
             if prev == 0xFF and cur == 0xD9:
-                break
+                process_image(bytes(jpg))
+                jpg.clear()
+                in_image = False
+        else:
+            if prev == 0xFF and cur == 0xD8:
+                jpg = bytearray([0xFF, 0xD8])
+                in_image = True
+            else:
+                line_buf.append(cur)
+                if cur == ord('\n'):
+                    handle_text_line(line_buf.decode(errors="ignore").strip())
+                    line_buf.clear()
 
         prev = cur
+def handle_text_line(line):
+    try:
+        if line.startswith("TMP:"):
+            t = float(line.split(":")[1])
+            root.after(0, lambda: object_temp_var.set(f"{t:.2f} °C"))
 
-    if not jpg:
-        status_label.config(text="Capture failed")
-        return
+        elif line.startswith("IMU:"):
+            vals = [float(v) for v in line.split(":")[1].split(",")]
+            ax, ay, az, gx, gy, gz = vals
+            mag = math.sqrt(ax*ax + ay*ay + az*az)
 
-    img = Image.open(io.BytesIO(jpg))
-    draw = ImageDraw.Draw(img)
+            root.after(0, lambda:
+                imu_var.set(f"{ax:.2f}, {ay:.2f}, {az:.2f} | {gx:.1f}, {gy:.1f}, {gz:.1f}")
+            )
 
-    # ---- Gather latest values ----
-    temp_text = object_temp_var.get()
-    imu_text = imu_var.get()
-    voltage_text = object_voltage_var.get()
+            check_for_impact(mag)
 
-    overlay_text = (
-        f"TEMP: {temp_text}\n"
-        f"IMU:  {imu_text}\n"
-        f"BAT:  {voltage_text}"
-    )
+        elif line.startswith("V:"):
+            v = float(line.split(":")[1])
+            root.after(0, lambda: object_voltage_var.set(f"{v:.2f} V"))
 
-    # ---- Text positioning (top-right) ----
-    padding = 10
-    text_bbox = draw.multiline_textbbox((0, 0), overlay_text, font=FONT)
-    text_w = text_bbox[2] - text_bbox[0]
-    text_h = text_bbox[3] - text_bbox[1]
-
-    x = text_w - padding
-    y = padding
-
-    # ---- Optional background box for readability ----
-    bg_padding = 6
-    draw.rectangle(
-        [
-            x - bg_padding,
-            y - bg_padding,
-            x + text_w + bg_padding,
-            y + text_h + bg_padding,
-        ],
-        fill=(0, 0, 0, 160)
-    )
-
-    # ---- Draw text ----
-    draw.multiline_text(
-        (x, y),
-        overlay_text,
-        fill=FONT_COLOR,
-        font=FONT,
-        spacing=4,
-    )
+    except Exception:
+        pass
 
 
-    # Resize to available area
-    area_w = image_label.winfo_width()
-    area_h = image_label.winfo_height()
-
-    img_ratio = img.width / img.height
-    area_ratio = area_w / area_h
-
-    if img_ratio > area_ratio:
-        new_w = area_w
-        new_h = int(area_w / img_ratio)
-    else:
-        new_h = area_h
-        new_w = int(area_h * img_ratio)
-
-    img = img.resize((new_w, new_h), Image.BILINEAR)
-
-    img_tk = ImageTk.PhotoImage(img)
-    image_label.config(image=img_tk)
-    image_label.image = img_tk
-
-    status_label.config(text=f"Captured ({img.width}x{img.height})")
-
-# -------------------------
-# LOW LIGHT FUNCTIONS
-# -------------------------
-def set_exposure_ms(ms):
-    ms = int(ms)
-
-    msb = (ms >> 8) & 0xFF
-    lsb = ms & 0xFF
-
-    ser.write(bytes([0x21, msb, lsb]))
-    status_label.config(text=f"Exposure set to {ms} ms")
-
-
-def set_gain(value):
-    ser.write(bytes([0x22, value]))
-    status_label.config(text=f"Gain set to 0x{value:02X}")
-def image_receiver():
-    jpg = bytearray()
-    prev = None
-    in_image = False
-
-    while True:
-        try:
-            b = ser.read(1)
-            if not b:
-                continue
-
-            cur = b[0]
-
-            if not in_image:
-                if prev == 0xFF and cur == 0xD8:
-                    in_image = True
-                    jpg = bytearray([0xFF, 0xD8])
-            else:
-                jpg.append(cur)
-                if prev == 0xFF and cur == 0xD9:
-                    # Full JPEG received
-                    process_image(bytes(jpg))
-                    in_image = False
-                    jpg = bytearray()
-
-            prev = cur
-
-        except Exception:
-            pass
 def process_image(jpg_bytes):
     try:
-        img = Image.open(io.BytesIO(jpg_bytes))
+        # ---- Decode image ----
+        img = Image.open(io.BytesIO(jpg_bytes)).convert("RGBA")
 
-        # Resize to image area
+        # ---- Resize first ----
         area_w = image_label.winfo_width()
         area_h = image_label.winfo_height()
-
         if area_w <= 1 or area_h <= 1:
             return
 
@@ -496,6 +371,52 @@ def process_image(jpg_bytes):
 
         img = img.resize((new_w, new_h), Image.BILINEAR)
 
+        # ---- Draw overlay on resized image ----
+        draw = ImageDraw.Draw(img)
+
+        temp_text = object_temp_var.get()
+        imu_text = imu_var.get()
+        voltage_text = object_voltage_var.get()
+
+        overlay_text = (
+            f"TEMP: {temp_text}\n"
+            f"IMU:  {imu_text}\n"
+            f"BAT:  {voltage_text}"
+        )
+
+        # Text size and padding
+        padding = 10
+        bg_padding = 6
+
+        text_bbox = draw.multiline_textbbox((0, 0), overlay_text, font=FONT, spacing=4)
+        text_w = text_bbox[2] - text_bbox[0]
+        text_h = text_bbox[3] - text_bbox[1]
+
+        # Top-right position
+        x = img.width - text_w - padding
+        y = padding
+
+        # Background rectangle
+        draw.rectangle(
+            (
+                x - bg_padding,
+                y - bg_padding,
+                x + text_w + bg_padding,
+                y + text_h + bg_padding,
+            ),
+            fill=(0, 0, 0, 160),
+        )
+
+        # Draw the text
+        draw.multiline_text(
+            (x, y),
+            overlay_text,
+            fill=FONT_COLOR,
+            font=FONT,
+            spacing=4,
+        )
+
+        # ---- Display ----
         img_tk = ImageTk.PhotoImage(img)
 
         def update_ui():
@@ -504,51 +425,12 @@ def process_image(jpg_bytes):
 
         root.after(0, update_ui)
 
+        status_label.config(text=f"Captured ({img.width}x{img.height})")
+
     except Exception as e:
-        print("Image error:", e)
+        print("Image processing failed:", e)
 
-def update_temperature():
-    latest_temp = None
-    latest_imu = None
-
-    try:
-        while ser.in_waiting:
-            line = ser.readline().decode("ascii", errors="ignore").strip()
-
-            if not line:
-                continue
-
-            # ---- Temperature ----
-            if line.startswith("TMP:"):
-                latest_temp = float(line.split(":")[1])
-
-            # ---- IMU ----
-            elif line.startswith("IMU:"):
-                values = line.split(":")[1].split(",")
-                if len(values) == 6:
-                    latest_imu = [float(v) for v in values]
-            elif line.startswith("V:"):
-                vbat = float(line.split(":")[1])
-                object_voltage_var.set(f"{vbat:.0f} V")
-
-        if latest_temp is not None:
-            object_temp_var.set(f"{latest_temp:.2f} °C")
-
-        if latest_imu is not None:
-            ax, ay, az, gx, gy, gz = latest_imu
-            accel_mag = math.sqrt(ax*ax + ay*ay + az*az)
-            imu_var.set(
-                f"{ax:.2f}, {ay:.2f}, {az:.2f} | "
-                f"{gx:.1f}, {gy:.1f}, {gz:.1f}"
-            )
-            check_for_impact(accel_mag)
-        if latest_voltage is not None:
-            object_voltage_var.set(f"{vbat:.2f} %")
-
-    except Exception:
-        pass
-
-    root.after(250, update_temperature)
+ 
 def check_for_impact(accel_mag):
     global last_impact_time, last_accel_mag
 
@@ -576,20 +458,12 @@ def check_for_impact(accel_mag):
         root.after(0, capture_image)
 
 
-# -------------------------
-# CLEAN EXIT
-# -------------------------
 def on_close():
     ser.close()
     root.destroy()
 
 root.protocol("WM_DELETE_WINDOW", on_close)
-
-# -------------------------
-# START
-# -------------------------
-update_temperature()
 update_timer()
-threading.Thread(target=image_receiver, daemon=True).start()
+threading.Thread(target=serial_receiver, daemon=True).start()
 
 root.mainloop()
