@@ -36,11 +36,17 @@ LSM6DS3 imu(I2C_MODE, 0x6B);
 // --------------------
 float gBiasX = 0, gBiasY = 0, gBiasZ = 0;
 unsigned long lastIMUTime = 0;
-
+bool deployed = false;
 // Integrated angles (deg)
 float angleX = 0, angleY = 0, angleZ = 0;
 unsigned long lastTelemetryTime = 0;
 const unsigned long TELEMETRY_INTERVAL_MS = 200; // 5Hz
+// --------------------
+// AUTO CAPTURE
+// --------------------
+unsigned long lastCaptureTime = 0;
+const unsigned long CAPTURE_INTERVAL_MS = 2000;
+bool lowResSet = false;
 
 // --------------------
 // SETUP
@@ -109,8 +115,27 @@ void setup() {
 // LOOP
 // --------------------
 void loop() {
+  // --------------------
+  // AUTO IMAGE CAPTURE AFTER DEPLOY
+  // --------------------
+  if (deployed) {
+
+    // Set low resolution once after deploy
+    if (!lowResSet) {
+      myCAM.OV2640_set_JPEG_size(OV2640_320x240);  // LOW RES
+      lowResSet = true;
+      delay(50);
+    }
+
+    // Capture every 2 seconds
+    if (millis() - lastCaptureTime >= CAPTURE_INTERVAL_MS) {
+      lastCaptureTime = millis();
+      captureJPEG();
+    }
+  }
+
   // 1) Send telemetry at fixed rate
-  if (millis() - lastTelemetryTime >= TELEMETRY_INTERVAL_MS) {
+  if (millis() - lastTelemetryTime >= TELEMETRY_INTERVAL_MS && deployed) {
     lastTelemetryTime = millis();
 
     float temp = mlx.readObjectTempC();
@@ -163,10 +188,6 @@ void loop() {
       case 0x07: myCAM.OV2640_set_JPEG_size(OV2640_1280x1024); break;
       case 0x08: myCAM.OV2640_set_JPEG_size(OV2640_1600x1200); break;
 
-      case 0x10:
-        captureJPEG();
-        break;
-
       case 0x21: {
         while (Serial.available() < 2);
         uint16_t ms = (Serial.read() << 8) | Serial.read();
@@ -178,6 +199,16 @@ void loop() {
         while (!Serial.available());
         uint8_t gain = Serial.read();
         setGain(gain);
+        break;
+      }
+      case 0x99:{
+        deployed = true;
+        lowResSet = false;        // force resolution reset
+        lastCaptureTime = 0;
+        break;
+      }
+      case 0x98:{
+        deployed = false;
         break;
       }
     }
