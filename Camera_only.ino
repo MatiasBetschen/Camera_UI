@@ -18,6 +18,7 @@ char imageFilename[20];
 // PIN DEFINITIONS
 // --------------------
 #define CAM_CS_PIN 10
+#define LED_Pin 12
 // --------------------
 // CONSTANTS
 // --------------------
@@ -44,16 +45,27 @@ const unsigned long TELEMETRY_INTERVAL_MS = 200; // 5Hz
 // --------------------
 // AUTO CAPTURE
 // --------------------
-unsigned long lastCaptureTime = 0;
-const unsigned long CAPTURE_INTERVAL_MS = 2000;
-bool lowResSet = false;
+bool jpegSending = false;
+
+bool cameraBusy = false;
+bool autoCaptureEnabled = false;
+// --------------------
+// IMPACT DETECTION
+// --------------------
+#define IMPACT_PEAK_G      2.2     // shock threshold
+#define IMPACT_DELTA_G    0.8     // sudden change
+#define IMPACT_COOLDOWN_MS 1500
+
+float lastAccelMag = 0;
+unsigned long lastImpactTime = 0;
+bool impactPending = false;
 
 // --------------------
 // SETUP
 // --------------------
 void setup() {
   uint8_t vid, pid;
-
+  pinMode(LED_Pin, OUTPUT);
   Wire.begin();
   Serial.begin(115200);
   delay(2000);
@@ -115,24 +127,22 @@ void setup() {
 // LOOP
 // --------------------
 void loop() {
-  // --------------------
-  // AUTO IMAGE CAPTURE AFTER DEPLOY
-  // --------------------
-  if (deployed) {
+ // Send deferred impact message when safe
+  if (impactPending && !jpegSending) {
+    Serial.println("IMPACT");
+    impactPending = false;
 
-    // Set low resolution once after deploy
-    if (!lowResSet) {
-      myCAM.OV2640_set_JPEG_size(OV2640_320x240);  // LOW RES
-      lowResSet = true;
-      delay(50);
-    }
-
-    // Capture every 2 seconds
-    if (millis() - lastCaptureTime >= CAPTURE_INTERVAL_MS) {
-      lastCaptureTime = millis();
-      captureJPEG();
-    }
+    // Optional: stop auto capture immediately
+    autoCaptureEnabled = false;
+    deployed = false;
   }
+
+  if (deployed && autoCaptureEnabled && !cameraBusy) {
+    cameraBusy = true;
+    captureJPEG();       // blocking, but safe
+    cameraBusy = false;
+  }
+
 
   // 1) Send telemetry at fixed rate
   if (millis() - lastTelemetryTime >= TELEMETRY_INTERVAL_MS && deployed) {
@@ -147,7 +157,7 @@ void loop() {
     float gx = imu.readFloatGyroX() - gBiasX;
     float gy = imu.readFloatGyroY() - gBiasY;
     float gz = imu.readFloatGyroZ() - gBiasZ;
-
+    detectImpact(ax, ay, az);
     // Send in your required format
     Serial.print("TMP:");
     Serial.println(temp, 2);
@@ -203,12 +213,13 @@ void loop() {
       }
       case 0x99:{
         deployed = true;
-        lowResSet = false;        // force resolution reset
-        lastCaptureTime = 0;
+        autoCaptureEnabled = true;
+        cameraBusy = false;   // force first capture
         break;
       }
       case 0x98:{
         deployed = false;
+        autoCaptureEnabled = false;
         break;
       }
     }
@@ -287,6 +298,9 @@ void setGain(uint8_t gain) {
 }
 
 void captureJPEG() {
+  if (!deployed) return;
+  jpegSending = true;
+  digitalWrite(LED_Pin, HIGH);
   myCAM.flush_fifo();
   myCAM.clear_fifo_flag();
   myCAM.start_capture();
@@ -296,6 +310,7 @@ void captureJPEG() {
   uint32_t length = myCAM.read_fifo_length();
   if (!length || length >= MAX_FIFO_SIZE) {
     myCAM.clear_fifo_flag();
+    jpegSending = false;
     return;
   }
 
@@ -325,4 +340,21 @@ void captureJPEG() {
 
   digitalWrite(CAM_CS_PIN, HIGH);
   myCAM.clear_fifo_flag();
+  digitalWrite(LED_Pin, LOW);
+  jpegSending = false;
 }
+void detectImpact(float ax, float ay, float az) {
+  float mag = sqrt(ax*ax + ay*ay + az*az);
+  float delta = fabs(mag - lastAccelMag);
+  lastAccelMag = mag;
+
+  unsigned long now = millis();
+
+  if ((mag > IMPACT_PEAK_G || delta > IMPACT_DELTA_G) &&
+      (now - lastImpactTime) > IMPACT_COOLDOWN_MS) {
+
+    lastImpactTime = now;
+    impactPending = true;   // defer reporting
+  }
+}
+
