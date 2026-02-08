@@ -1,0 +1,54 @@
+import time
+import math
+
+class ImpactDetector:
+    def __init__(self):
+        # ---- Tunable parameters (DROP TEST) ----
+        self.IMPACT_G_THRESHOLD = 3.0      # g
+        self.IMPACT_CONFIRM_SAMPLES = 3
+        self.STILLNESS_THRESHOLD = 0.15    # g change
+        self.STILLNESS_TIME = 0.15         # seconds
+
+        # ---- Internal state ----
+        self.impact_samples = 0
+        self.impact_candidate = False
+        self.stillness_start = None
+        self.last_a_mag = 1.0
+        self.impact_detected = False
+
+    def update(self, ax, ay, az):
+        """
+        Call this once per IMU sample.
+        Returns True exactly once when impact is detected.
+        """
+
+        if self.impact_detected:
+            return False  # already triggered
+
+        # Acceleration magnitude (g)
+        a_mag = math.sqrt(ax*ax + ay*ay + az*az)
+
+        # ---- 1. Detect acceleration spike ----
+        if a_mag > self.IMPACT_G_THRESHOLD:
+            self.impact_samples += 1
+            if self.impact_samples >= self.IMPACT_CONFIRM_SAMPLES:
+                self.impact_candidate = True
+        else:
+            self.impact_samples = 0
+
+        # ---- 2. Confirm stillness after spike ----
+        if self.impact_candidate:
+            delta = abs(a_mag - self.last_a_mag)
+
+            if delta < self.STILLNESS_THRESHOLD:
+                if self.stillness_start is None:
+                    self.stillness_start = time.time()
+
+                if time.time() - self.stillness_start > self.STILLNESS_TIME:
+                    self.impact_detected = True
+                    return True
+            else:
+                self.stillness_start = None
+
+        self.last_a_mag = a_mag
+        return False

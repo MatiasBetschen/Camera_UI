@@ -24,6 +24,13 @@ char imageFilename[20];
 // --------------------
 #define LINE_TIME_US 30.0
 #define MAX_EXPOSURE_LINES 0xFFFFF
+// --------------------
+// IMPACT FILTERING
+// --------------------
+#define LPF_ALPHA            0.90f   // gravity LPF
+#define IMPACT_ENERGY_THRESH 1.6f    // g
+#define IMPACT_WINDOW_MS     20      // integration window
+#define IMPACT_COOLDOWN_MS   1500
 
 // --------------------
 // OBJECTS
@@ -49,16 +56,35 @@ bool jpegSending = false;
 
 bool cameraBusy = false;
 bool autoCaptureEnabled = false;
-// --------------------
-// IMPACT DETECTION
-// --------------------
-#define IMPACT_PEAK_G      2.2     // shock threshold
-#define IMPACT_DELTA_G    0.8     // sudden change
-#define IMPACT_COOLDOWN_MS 1500
 
+#define IMPACT_G_THRESH 1.5  // Adjust based on drop height (2-4g typical)
+#define IMPACT_COOLDOWN_MS 150 // Prevent multiple triggers
 float lastAccelMag = 0;
 unsigned long lastImpactTime = 0;
 bool impactPending = false;
+float gLPX = 0, gLPY = 0, gLPZ = 0;
+float impactEnergy = 0;
+unsigned long impactWindowStart = 0;
+// --------------------
+// VELOCITY-BASED IMPACT
+// --------------------
+#define LPF_ALPHA            0.90f   // gravity low-pass
+#define VEL_DAMPING          0.98f   // kills drift
+#define STATIONARY_VEL_MPS   0.05f   // ~5 cm/s
+#define STATIONARY_TIME_MS  120     // must stay still this long
+#define IMPACT_COOLDOWN_MS  1500
+// Gravity estimate
+float gLPX = 0, gLPY = 0, gLPZ = 0;
+
+// Velocity estimate (m/s)
+float velX = 0, velY = 0, velZ = 0;
+
+unsigned long lastVelTime = 0;
+unsigned long stationaryStart = 0;
+unsigned long lastImpactTime = 0;
+
+bool impactPending = false;
+
 
 // --------------------
 // SETUP
@@ -66,6 +92,7 @@ bool impactPending = false;
 void setup() {
   uint8_t vid, pid;
   pinMode(LED_Pin, OUTPUT);
+  digitalWrite(LED_Pin, LOW);
   Wire.begin();
   Serial.begin(115200);
   delay(2000);
@@ -197,26 +224,16 @@ void loop() {
       case 0x06: myCAM.OV2640_set_JPEG_size(OV2640_1024x768); break;
       case 0x07: myCAM.OV2640_set_JPEG_size(OV2640_1280x1024); break;
       case 0x08: myCAM.OV2640_set_JPEG_size(OV2640_1600x1200); break;
-
-      case 0x21: {
-        while (Serial.available() < 2);
-        uint16_t ms = (Serial.read() << 8) | Serial.read();
-        setExposureMs(ms);
-        break;
-      }
-
-      case 0x22: {
-        while (!Serial.available());
-        uint8_t gain = Serial.read();
-        setGain(gain);
-        break;
-      }
       case 0x99:{
         deployed = true;
         autoCaptureEnabled = true;
         cameraBusy = false;   // force first capture
+        velX = velY = velZ = 0;
+        stationaryStart = 0;
+        lastVelTime = millis();
         break;
       }
+
       case 0x98:{
         deployed = false;
         autoCaptureEnabled = false;
@@ -226,10 +243,6 @@ void loop() {
   }
 }
 
-
-// --------------------
-// IMU FUNCTIONS
-// --------------------
 void calibrateGyro() {
   gBiasX = gBiasY = gBiasZ = 0;
 
@@ -266,50 +279,22 @@ void updateGyroAngles() {
   angleZ += gz * dt;
 }
 
-// --------------------
-// CAMERA FUNCTIONS
-// --------------------
-void disableAutoExposureAndGain() {
-  myCAM.wrSensorReg8_8(0xFF, 0x01);
-  uint8_t com8;
-  myCAM.rdSensorReg8_8(0x13, &com8);
-  com8 &= ~0x05;
-  myCAM.wrSensorReg8_8(0x13, com8);
-}
-
-void setExposureMs(uint16_t ms) {
-  disableAutoExposureAndGain();
-
-  uint32_t exposure_lines = (ms * 1000.0) / LINE_TIME_US;
-  if (exposure_lines > MAX_EXPOSURE_LINES)
-    exposure_lines = MAX_EXPOSURE_LINES;
-
-  myCAM.wrSensorReg8_8(0xFF, 0x01);
-
-  myCAM.wrSensorReg8_8(0x04, (exposure_lines >> 12) & 0x0F);
-  myCAM.wrSensorReg8_8(0x10, (exposure_lines >> 4) & 0xFF);
-  myCAM.wrSensorReg8_8(0x45, (exposure_lines & 0x0F) << 4);
-}
-
-void setGain(uint8_t gain) {
-  disableAutoExposureAndGain();
-  myCAM.wrSensorReg8_8(0xFF, 0x01);
-  myCAM.wrSensorReg8_8(0x00, gain);
-}
-
 void captureJPEG() {
   if (!deployed) return;
+
   jpegSending = true;
-  digitalWrite(LED_Pin, HIGH);
+  digitalWrite(LED_Pin, HIGH);   // LED ON only here
+
   myCAM.flush_fifo();
   myCAM.clear_fifo_flag();
   myCAM.start_capture();
 
   while (!myCAM.get_bit(ARDUCHIP_TRIG, CAP_DONE_MASK));
-
+  digitalWrite(LED_Pin, LOW);  
   uint32_t length = myCAM.read_fifo_length();
   if (!length || length >= MAX_FIFO_SIZE) {
     myCAM.clear_fifo_flag();
+    digitalWrite(LED_Pin, LOW);
     jpegSending = false;
     return;
   }
@@ -340,21 +325,62 @@ void captureJPEG() {
 
   digitalWrite(CAM_CS_PIN, HIGH);
   myCAM.clear_fifo_flag();
-  digitalWrite(LED_Pin, LOW);
   jpegSending = false;
 }
-void detectImpact(float ax, float ay, float az) {
-  float mag = sqrt(ax*ax + ay*ay + az*az);
-  float delta = fabs(mag - lastAccelMag);
-  lastAccelMag = mag;
 
+void detectImpact(float ax, float ay, float az) {
   unsigned long now = millis();
 
-  if ((mag > IMPACT_PEAK_G || delta > IMPACT_DELTA_G) &&
-      (now - lastImpactTime) > IMPACT_COOLDOWN_MS) {
+  if (lastVelTime == 0) {
+    lastVelTime = now;
+    return;
+  }
 
-    lastImpactTime = now;
-    impactPending = true;   // defer reporting
+  float dt = (now - lastVelTime) / 1000.0f;
+  lastVelTime = now;
+
+  if (dt <= 0 || dt > 0.2f) return;
+
+  // --- Gravity estimation (LPF) ---
+  gLPX = LPF_ALPHA * gLPX + (1.0f - LPF_ALPHA) * ax;
+  gLPY = LPF_ALPHA * gLPY + (1.0f - LPF_ALPHA) * ay;
+  gLPZ = LPF_ALPHA * gLPZ + (1.0f - LPF_ALPHA) * az;
+
+  // --- Linear acceleration (remove gravity) ---
+  float lax = (ax - gLPX) * 9.81f;
+  float lay = (ay - gLPY) * 9.81f;
+  float laz = (az - gLPZ) * 9.81f;
+
+  // --- Integrate to velocity ---
+  velX += lax * dt;
+  velY += lay * dt;
+  velZ += laz * dt;
+
+  // --- Drift damping ---
+  velX *= VEL_DAMPING;
+  velY *= VEL_DAMPING;
+  velZ *= VEL_DAMPING;
+
+  float velMag = sqrt(velX*velX + velY*velY + velZ*velZ);
+
+  // --- Stationary detection ---
+  if (velMag < STATIONARY_VEL_MPS) {
+    if (stationaryStart == 0)
+      stationaryStart = now;
+
+    if ((now - stationaryStart) > STATIONARY_TIME_MS &&
+        (now - lastImpactTime) > IMPACT_COOLDOWN_MS) {
+
+      lastImpactTime = now;
+      impactPending = true;
+
+      // Reset velocity to avoid re-trigger
+      velX = velY = velZ = 0;
+      stationaryStart = 0;
+    }
+  } else {
+    stationaryStart = 0;
   }
 }
+
 
