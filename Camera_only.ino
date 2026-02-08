@@ -57,7 +57,7 @@ bool jpegSending = false;
 bool cameraBusy = false;
 bool autoCaptureEnabled = false;
 
-#define IMPACT_G_THRESH 1.5  // Adjust based on drop height (2-4g typical)
+#define IMPACT_G_THRESH 2  // Adjust based on drop height (2-4g typical)
 #define IMPACT_COOLDOWN_MS 150 // Prevent multiple triggers
 float lastAccelMag = 0;
 unsigned long lastImpactTime = 0;
@@ -304,7 +304,7 @@ void captureJPEG() {
 
   bool started = false;
   uint8_t prev = 0, cur;
-
+  int i=0;
   while (length--) {
     cur = SPI.transfer(0x00);
 
@@ -318,7 +318,14 @@ void captureJPEG() {
       Serial.write(cur);
       if (prev == 0xFF && cur == 0xD9) break;
     }
-
+    i++;
+    if(i>300){
+      float ax = imu.readFloatAccelX();
+      float ay = imu.readFloatAccelY();
+      float az = imu.readFloatAccelZ();
+      detectImpact(ax, ay, az);
+      i=0;
+    }
     prev = cur;
     delayMicroseconds(15);
   }
@@ -330,56 +337,10 @@ void captureJPEG() {
 
 void detectImpact(float ax, float ay, float az) {
   unsigned long now = millis();
-
-  if (lastVelTime == 0) {
-    lastVelTime = now;
-    return;
-  }
-
-  float dt = (now - lastVelTime) / 1000.0f;
-  lastVelTime = now;
-
-  if (dt <= 0 || dt > 0.2f) return;
-
-  // --- Gravity estimation (LPF) ---
-  gLPX = LPF_ALPHA * gLPX + (1.0f - LPF_ALPHA) * ax;
-  gLPY = LPF_ALPHA * gLPY + (1.0f - LPF_ALPHA) * ay;
-  gLPZ = LPF_ALPHA * gLPZ + (1.0f - LPF_ALPHA) * az;
-
-  // --- Linear acceleration (remove gravity) ---
-  float lax = (ax - gLPX) * 9.81f;
-  float lay = (ay - gLPY) * 9.81f;
-  float laz = (az - gLPZ) * 9.81f;
-
-  // --- Integrate to velocity ---
-  velX += lax * dt;
-  velY += lay * dt;
-  velZ += laz * dt;
-
-  // --- Drift damping ---
-  velX *= VEL_DAMPING;
-  velY *= VEL_DAMPING;
-  velZ *= VEL_DAMPING;
-
-  float velMag = sqrt(velX*velX + velY*velY + velZ*velZ);
-
-  // --- Stationary detection ---
-  if (velMag < STATIONARY_VEL_MPS) {
-    if (stationaryStart == 0)
-      stationaryStart = now;
-
-    if ((now - stationaryStart) > STATIONARY_TIME_MS &&
-        (now - lastImpactTime) > IMPACT_COOLDOWN_MS) {
-
+  float mag = sqrt(ax*ax + ay*ay + az*az);
+  if (mag >= IMPACT_G_THRESH && (now - lastImpactTime) >= IMPACT_COOLDOWN_MS) {
       lastImpactTime = now;
       impactPending = true;
-
-      // Reset velocity to avoid re-trigger
-      velX = velY = velZ = 0;
-      stationaryStart = 0;
-    }
-  } else {
-    stationaryStart = 0;
   }
 }
 

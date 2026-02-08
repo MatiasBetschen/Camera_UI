@@ -215,11 +215,17 @@ latest_voltage = tk.Label(
 )
 latest_voltage.pack(anchor="w", padx=15, pady=(5, 20))
 impact_debug_var = tk.StringVar(value="Impact Debug: --")
-
+tk.Label(
+    data_panel,
+    text="Accel Magnitude:",
+    fg="white",
+    bg="#1e1e1e",
+    font=("Segoe UI", 11)
+).pack(anchor="w", padx=15)
 impact_debug_label = tk.Label(
     data_panel,
     textvariable=impact_debug_var,
-    fg="#ffaa00",
+    fg="white",
     bg="#1e1e1e",
     font=("Consolas", 9),
     wraplength=180,
@@ -355,6 +361,7 @@ def reset_deploy():
     image_label.image = None
     last_accel_mag = None
     last_impact_time = 0
+    debug_mode = False
 
 def start_playback():
     global playback_active
@@ -460,12 +467,25 @@ def handle_text_line(line):
             vals = [float(v) for v in line.split(":")[1].split(",")]
             ax, ay, az, gx, gy, gz = vals
             mag = math.sqrt(ax*ax + ay*ay + az*az)
+            
+            if mag >= 1200:
+                playback_active = True  # Prevents new images from being buffered
+                # Update status
+                root.after(0, lambda: set_status("IMPACT"))
+                root.after(0, lambda: status_label.config(text="IMPACT DETECTED – STOPPING CAMERA"))
+                # Stop camera
+                ser.write(bytes([0x98]))
+                # Start playback after short delay
+                root.after(1000, start_playback)
 
             def update_imu_labels():
                 imu_accel_var.set(f"{ax:.2f}, {ay:.2f}, {az:.2f} [g]")
                 imu_gyro_var.set(f"{gx:.1f}, {gy:.1f}, {gz:.1f} [°/s]")
 
             root.after(0, update_imu_labels)
+            def update_vel_labels():
+                impact_debug_var.set(f"mag={mag:.3f} [g]")
+            root.after(0, update_vel_labels)
 
         elif line.startswith("VEL:"):
             vals = [float(v) for v in line.split(":")[1].split(",")]
@@ -479,7 +499,7 @@ def handle_text_line(line):
 
         elif line.startswith("V:"):
             v = float(line.split(":")[1])
-            root.after(0, lambda: object_voltage_var.set(f"{v:.2f} V"))
+            root.after(0, lambda: object_voltage_var.set(f"{v:.2f} %"))
         elif line == "IMPACT":
             # Stop further image buffering
             playback_active = True  # Prevents new images from being buffered
