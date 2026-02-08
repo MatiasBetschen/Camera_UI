@@ -327,8 +327,9 @@ def stop_debug():
     ser.write(bytes([0x98]))
 
 def deploy():
-    global deployed, deploy_start_time
+    global deployed, deploy_start_time,debug_mode
     status_label.config(text="Deploying...")
+    debug_mode = False
     root.update_idletasks()
     ser.reset_input_buffer()
     ser.reset_output_buffer()
@@ -340,7 +341,7 @@ def deploy():
     deployed = True
     deploy_start_time = time.time()
 def reset_deploy():
-    global deployed, deploy_start_time, playback_active,last_accel_mag, last_impact_time
+    global deployed, deploy_start_time, playback_active,last_accel_mag, last_impact_time,debug_mode
     status_label.config(text="Resetting...")
     root.update_idletasks()
     ser.reset_input_buffer()
