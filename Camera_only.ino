@@ -14,81 +14,35 @@
 uint32_t imageCounter = 0;
 char imageFilename[20];
 
-// --------------------
-// PIN DEFINITIONS
-// --------------------
 #define CAM_CS_PIN 10
 #define LED_Pin 12
-// --------------------
-// CONSTANTS
-// --------------------
+
 #define LINE_TIME_US 30.0
 #define MAX_EXPOSURE_LINES 0xFFFFF
-// --------------------
-// IMPACT FILTERING
-// --------------------
-#define LPF_ALPHA            0.90f   // gravity LPF
-#define IMPACT_ENERGY_THRESH 1.6f    // g
-#define IMPACT_WINDOW_MS     20      // integration window
-#define IMPACT_COOLDOWN_MS   1500
 
-// --------------------
-// OBJECTS
-// --------------------
 ArduCAM myCAM(OV2640, CAM_CS_PIN);
 Adafruit_MLX90614 mlx = Adafruit_MLX90614();
 LSM6DS3 imu(I2C_MODE, 0x6B);
 
-// --------------------
-// IMU VARIABLES
-// --------------------
 float gBiasX = 0, gBiasY = 0, gBiasZ = 0;
 unsigned long lastIMUTime = 0;
 bool deployed = false;
-// Integrated angles (deg)
+
 float angleX = 0, angleY = 0, angleZ = 0;
 unsigned long lastTelemetryTime = 0;
-const unsigned long TELEMETRY_INTERVAL_MS = 200; // 5Hz
-// --------------------
-// AUTO CAPTURE
-// --------------------
+const unsigned long TELEMETRY_INTERVAL_MS = 200; 
+
 bool jpegSending = false;
 
 bool cameraBusy = false;
 bool autoCaptureEnabled = false;
 
-#define IMPACT_G_THRESH 2  // Adjust based on drop height (2-4g typical)
-#define IMPACT_COOLDOWN_MS 150 // Prevent multiple triggers
+#define IMPACT_G_THRESH 2  
+#define IMPACT_COOLDOWN_MS 150
 float lastAccelMag = 0;
 unsigned long lastImpactTime = 0;
 bool impactPending = false;
-float gLPX = 0, gLPY = 0, gLPZ = 0;
-float impactEnergy = 0;
-unsigned long impactWindowStart = 0;
-// --------------------
-// VELOCITY-BASED IMPACT
-// --------------------
-#define LPF_ALPHA            0.90f   // gravity low-pass
-#define VEL_DAMPING          0.98f   // kills drift
-#define STATIONARY_VEL_MPS   0.05f   // ~5 cm/s
-#define STATIONARY_TIME_MS  120     // must stay still this long
-#define IMPACT_COOLDOWN_MS  1500
-// Gravity estimate
-float gLPX = 0, gLPY = 0, gLPZ = 0;
 
-// Velocity estimate (m/s)
-float velX = 0, velY = 0, velZ = 0;
-
-unsigned long lastVelTime = 0;
-unsigned long stationaryStart = 0;
-unsigned long lastImpactTime = 0;
-
-bool impactPending = false;
-
-
-// --------------------
-// SETUP
-// --------------------
 void setup() {
   uint8_t vid, pid;
   pinMode(LED_Pin, OUTPUT);
@@ -150,34 +104,29 @@ void setup() {
   Serial.println("Ready");
 }
 
-// --------------------
-// LOOP
-// --------------------
 void loop() {
- // Send deferred impact message when safe
   if (impactPending && !jpegSending) {
     Serial.println("IMPACT");
     impactPending = false;
 
-    // Optional: stop auto capture immediately
     autoCaptureEnabled = false;
     deployed = false;
   }
 
   if (deployed && autoCaptureEnabled && !cameraBusy) {
     cameraBusy = true;
-    captureJPEG();       // blocking, but safe
+    captureJPEG();      
     cameraBusy = false;
   }
 
 
-  // 1) Send telemetry at fixed rate
+  
   if (millis() - lastTelemetryTime >= TELEMETRY_INTERVAL_MS && deployed) {
     lastTelemetryTime = millis();
 
     float temp = mlx.readObjectTempC();
 
-    // Read IMU data
+   
     float ax = imu.readFloatAccelX();
     float ay = imu.readFloatAccelY();
     float az = imu.readFloatAccelZ();
@@ -185,7 +134,7 @@ void loop() {
     float gy = imu.readFloatGyroY() - gBiasY;
     float gz = imu.readFloatGyroZ() - gBiasZ;
     detectImpact(ax, ay, az);
-    // Send in your required format
+    
     Serial.print("TMP:");
     Serial.println(temp, 2);
 
@@ -198,19 +147,18 @@ void loop() {
     Serial.println(gz, 2);
 
     float measuredvbat = analogRead(VBATPIN);
-    measuredvbat *= 2;    // we divided by 2, so multiply back 
-    measuredvbat *= 3.3;  // Multiply by 3.3V, our reference voltage
-    measuredvbat /= 1024; // convert to voltage
+    measuredvbat *= 2;    
+    measuredvbat *= 3.3;  
+    measuredvbat /= 1024; 
     float voltage = measuredvbat;
     float percent = (voltage - 3.0) / (4.2 - 3.0) * 100.0;
-    // clamp to 0–100%
     if (percent > 100) percent = 100;
     if (percent < 0) percent = 0;
     Serial.print("V:");
     Serial.println(percent,1);
   }
 
-  // 2) Handle commands from PC (non-blocking)
+
   if (Serial.available()) {
     uint8_t cmd = Serial.read();
 
@@ -227,10 +175,7 @@ void loop() {
       case 0x99:{
         deployed = true;
         autoCaptureEnabled = true;
-        cameraBusy = false;   // force first capture
-        velX = velY = velZ = 0;
-        stationaryStart = 0;
-        lastVelTime = millis();
+        cameraBusy = false; 
         break;
       }
 
@@ -272,7 +217,7 @@ void updateGyroAngles() {
   float gx, gy, gz, dt;
   getGyroRates(gx, gy, gz, dt);
 
-  if (dt <= 0 || dt > 0.5) return; // safety
+  if (dt <= 0 || dt > 0.5) return;
 
   angleX += gx * dt;
   angleY += gy * dt;
@@ -283,7 +228,7 @@ void captureJPEG() {
   if (!deployed) return;
 
   jpegSending = true;
-  digitalWrite(LED_Pin, HIGH);   // LED ON only here
+  digitalWrite(LED_Pin, HIGH); 
 
   myCAM.flush_fifo();
   myCAM.clear_fifo_flag();
